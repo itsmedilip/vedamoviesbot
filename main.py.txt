@@ -1,0 +1,159 @@
+# VedaMoviesBot/main.py
+
+import logging
+import os
+import requests
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from config import TMDB_API_KEY, BOT_TOKEN
+
+# Enable logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TMDB_BASE_URL = "https://api.themoviedb.org/3"
+IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
+YOUTUBE_BASE_URL = "https://www.youtube.com/watch?v="
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a welcome message and instructions."""
+    reply_keyboard = [['Search Movie', 'Search Actor']]
+    markup = ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True)
+    await update.message.reply_text(
+        "Welcome to Veda Movies Bot! 🎬\n\n"
+        "You can search for movies or actors. What would you like to search for?",
+        reply_markup=markup,
+    )
+    return "CHOOSING_SEARCH_TYPE"
+
+async def search_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the user's choice of search type."""
+    user_choice = update.message.text
+    context.user_data['search_type'] = user_choice.lower().replace(" ", "_")
+    await update.message.reply_text(f"Okay, please enter the {user_choice.lower()} name you'd like to search for:", reply_markup=ReplyKeyboardRemove())
+    return "TYPING_QUERY"
+
+async def handle_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the user's search query."""
+    query = update.message.text
+    search_type = context.user_data.get('search_type')
+
+    if search_type == 'search_movie':
+        await search_movie(update, context, query)
+    elif search_type == 'search_actor':
+        await search_actor(update, context, query)
+    else:
+        await update.message.reply_text("Something went wrong. Please try again with /start.")
+        return -1
+    return -1
+
+async def search_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_name: str):
+    """Searches for movies by name and sends the results."""
+    params = {'api_key': TMDB_API_KEY, 'query': movie_name}
+    response = requests.get(f"{TMDB_BASE_URL}/search/movie", params=params)
+    response.raise_for_status()
+    results = response.json().get('results')
+
+    if results:
+        movie_id = results[0]['id']
+        await fetch_movie_details(update, context, movie_id)
+    else:
+        await update.message.reply_text(f"Sorry, no movies found with the name '{movie_name}'.")
+
+async def fetch_movie_details(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
+    """Fetches and sends detailed information about a movie."""
+    params = {'api_key': TMDB_API_KEY}
+    movie_response = requests.get(f"{TMDB_BASE_URL}/movie/{movie_id}", params=params)
+    movie_response.raise_for_status()
+    movie_data = movie_response.json()
+
+    credits_response = requests.get(f"{TMDB_BASE_URL}/movie/{movie_id}/credits", params=params)
+    credits_response.raise_for_status()
+    credits_data = credits_response.json()
+    cast = [actor['name'] for actor in credits_data.get('cast', [])[:5]]
+
+    videos_response = requests.get(f"{TMDB_BASE_URL}/movie/{movie_id}/videos", params=params)
+    videos_response.raise_for_status()
+    videos_data = videos_response.json()
+    trailer_key = next((video['key'] for video in videos_data.get('results', []) if video['type'].lower() == 'trailer' and video['site'].lower() == 'youtube'), None)
+    trailer_url = f"{YOUTUBE_BASE_URL}{trailer_key}" if trailer_key else "No official trailer found."
+
+    title = movie_data.get('title', 'N/A')
+    poster_path = movie_data.get('poster_path')
+    overview = movie_data.get('overview', 'N/A')
+    release_date = movie_data.get('release_date', 'N/A')
+    rating = movie_data.get('vote_average', 'N/A')
+
+    message = f"🎬 *{title}*\n\n"
+    if overview:
+        message += f"*Overview:* {overview}\n\n"
+    if release_date:
+        message += f"*Release Date:* {release_date}\n"
+    message += f"*Rating:* {rating}\n"
+    if cast:
+        message += f"*Cast:* {', '.join(cast)}\n"
+    message += f"*Trailer:* {trailer_url}"
+
+    if poster_path:
+        await context.bot.send_photo(chat_id=update.message.chat_id, photo=f"{IMAGE_BASE_URL}{poster_path}", caption=message, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+async def search_actor(update: Update, context: ContextTypes.DEFAULT_TYPE, actor_name: str):
+    """Searches for actors by name and sends the results."""
+    params = {'api_key': TMDB_API_KEY, 'query': actor_name}
+    response = requests.get(f"{TMDB_BASE_URL}/search/person", params=params)
+    response.raise_for_status()
+    results = response.json().get('results')
+
+    if results:
+        actor_id = results[0]['id']
+        await fetch_actor_details(update, context, actor_id)
+    else:
+        await update.message.reply_text(f"Sorry, no actors found with the name '{actor_name}'.")
+
+async def fetch_actor_details(update: Update, context: ContextTypes.DEFAULT_TYPE, actor_id: int):
+    """Fetches and sends detailed information about an actor."""
+    params = {'api_key': TMDB_API_KEY}
+    actor_response = requests.get(f"{TMDB_BASE_URL}/person/{actor_id}", params=params)
+    actor_response.raise_for_status()
+    actor_data = actor_response.json()
+
+    credits_response = requests.get(f"{TMDB_BASE_URL}/person/{actor_id}/movie_credits", params=params)
+    credits_response.raise_for_status()
+    credits_data = credits_response.json()
+    popular_movies = [movie['title'] for movie in sorted(credits_data.get('cast', []), key=lambda x: x.get('popularity', 0), reverse=True)[:5]]
+
+    profile_path = actor_data.get('profile_path')
+    full_name = actor_data.get('name', 'N/A')
+    biography = actor_data.get('biography', 'N/A')
+
+    message = f"👤 *{full_name}*\n\n"
+    if biography:
+        message += f"*Biography:* {biography}\n\n"
+    if popular_movies:
+        message += f"*Popular Movies:* {', '.join(popular_movies)}\n"
+
+    if profile_path:
+        await context.bot.send_photo(chat_id=update.message.chat_id, photo=f"{IMAGE_BASE_URL}{profile_path}", caption=message, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log the error and send a telegram message to notify the developer."""
+    logger.error(f"Update {update} caused error {context.error}")
+    await update.message.reply_text("An error occurred while processing your request. Please try again later.")
+
+def main():
+    """Starts the Telegram bot."""
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex(r"^(Search Movie|Search Actor)$"), search_type_chosen))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
+    app.add_error_handler(error_handler)
+
+    app.run_polling()
+
+if __name__ == '__main__':
+    main()
